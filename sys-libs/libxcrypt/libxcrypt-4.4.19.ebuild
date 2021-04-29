@@ -14,6 +14,15 @@ SLOT="0/1"
 KEYWORDS="~alpha ~amd64 ~arm ~arm64 ~hppa ~ia64 ~mips ~ppc ~ppc64 ~riscv ~s390 ~sparc ~x86"
 IUSE="+compat split-usr +static-libs system test"
 
+export CTARGET=${CTARGET:-${CHOST}}
+if [[ ${CTARGET} == ${CHOST} ]] ; then
+	if [[ ${CATEGORY/cross-} != ${CATEGORY} ]] ; then
+		export CTARGET=${CATEGORY/cross-}
+	fi
+fi
+
+is_cross() { [[ ${CHOST} != ${CTARGET} ]] ; }
+
 DEPEND="system? (
 		elibc_glibc? ( sys-libs/glibc[-crypt(+)] )
 		!sys-libs/musl
@@ -52,19 +61,50 @@ src_configure() {
 	multibuild_foreach_variant multilib-minimal_src_configure
 }
 
+get_xcsysroot() {
+	if is_cross; then
+		echo "${EPREFIX}/usr/${CTARGET}"
+	else
+		echo "/"
+	fi
+}
+
 get_xclibdir() {
-	printf -- "%s/%s/%s\n" \
+	printf -- "%s/%s/%s/%s\n" \
+		"$(get_xcsysroot)" \
 		"$(usex split-usr '' '/usr')" \
 		"$(get_libdir)" \
 		"$(usex system '' 'xcrypt')"
 }
 
+get_xcincludedir() {
+	printf -- "%s/%s/include/%s\n" \
+		"$(get_xcsysroot)" \
+		"$(usex split-usr '' '/usr')" \
+		"$(usex system '' 'xcrypt')"
+}
+
+get_xcmandir() {
+	printf -- "%s/%s/share/man\n" \
+		"$(get_xcsysroot)" \
+		"$(usex split-usr '' '/usr')"
+}
+
+get_xcpkgconfigdir() {
+	printf -- "%s/%s/%s/pkgconfig\n" \
+		"$(get_xcsysroot)" \
+		"$(usex split-usr '' '/usr')" \
+		"$(get_libdir)"
+}
+
 multilib_src_configure() {
 	local -a myconf=(
 		--disable-werror
+		--with-sysroot=$(get_xcsysroot)
 		--libdir=$(get_xclibdir)
-		--with-pkgconfigdir=/usr/$(get_libdir)/pkgconfig
-		--includedir="${EPREFIX}/usr/include/$(usex system '' 'xcrypt')"
+		--with-pkgconfigdir=$(get_xcpkgconfigdir)
+		--includedir=$(get_xcincludedir)
+		--mandir="$(get_xcmandir)"
 	)
 
 	case "${MULTIBUILD_ID}" in
@@ -102,19 +142,27 @@ src_test() {
 src_install() {
 	multibuild_foreach_variant multilib-minimal_src_install
 
+	if ! use system; then
 	(
 		shopt -s failglob || die "failglob failed"
 
 		# Make sure our man pages do not collide with glibc or man-pages.
-		for manpage in "${ED}"/usr/share/man/man3/crypt{,_r}.?*; do
+		for manpage in "${ED}$(get_xcmandir)"/man3/crypt{,_r}.?*; do
 			mv -n "${manpage}" "$(dirname "${manpage}")/xcrypt_$(basename "${manpage}")" \
 				|| die "mv failed"
 		done
 	) || die "failglob error"
+	fi
 
 	# remove useless stuff from installation
 	find "${D}"/usr/share/doc/${PF} -type l -delete || die
 	find "${D}" -name '*.la' -delete || die
+
+	# workaround broken upstream cross-* --docdir by installing files in proper locations
+	if is_cross; then
+		install -d ${D}$(get_xcsysroot)/usr/share/doc
+		mv "${D}/usr/share/doc/${PF}" "${D}$(get_xcsysroot)/usr/share/doc/${PF}"
+	fi
 }
 
 multilib_src_install() {
@@ -136,8 +184,8 @@ multilib_src_install() {
 						static_libs=( "${ED}"/$(get_xclibdir)/*.a )
 
 						if [[ -n ${static_libs[*]} ]]; then
-							dodir "/usr/$(get_xclibdir)"
-							mv "${static_libs[@]}" "${D}/usr/$(get_xclibdir)" \
+							dodir "$(get_xclibdir)"
+							mv "${static_libs[@]}" "${D}$(get_xclibdir)" \
 								|| die "moving static libs failed"
 						fi
 					fi
@@ -150,7 +198,7 @@ multilib_src_install() {
 						for lib_file in "${ED}"$(get_xclibdir)/*$(get_libname); do
 							lib_file_basename="$(basename "${lib_file}")"
 							lib_file_target="$(basename "$(readlink -f "${lib_file}")")"
-							dosym "../../$(get_libdir)/${lib_file_target}" "/usr/$(get_xclibdir)/${lib_file_basename}"
+							dosym "../../$(get_libdir)/${lib_file_target}" "$(get_xclibdir)/${lib_file_basename}"
 						done
 
 						rm "${ED}"$(get_xclibdir)/*$(get_libname) || die "removing symlinks in incorrect location failed"
